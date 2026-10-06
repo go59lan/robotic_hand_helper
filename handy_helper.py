@@ -5,27 +5,22 @@ from bidi.algorithm import get_display
 from gtts import gTTS
 import os
 from playsound3 import playsound
+import asyncio
 
 from google_model import Model
-
+from hand_control import HandControl
 
 
 class Helper:
 
     def __init__(self):
 
-        # self.arduino = serial.Serial(
-        #     '/dev/ttyACM0',
-        #     115200,
-        #     timeout=1
-        # )
-
         self.model = Model()
-
+        self.controller = HandControl()
         self.mic = None
         self.speaker = None
 
-    def listen(self):
+    async def listen(self):
 
         r = sr.Recognizer()
         with sr.Microphone() as source:
@@ -35,17 +30,33 @@ class Helper:
             print(get_display(text))
 
             response = self.model.query(text)
+            
+            await asyncio.gather(
+                self.speak(response["response"]),
+                self.gesture_sequence(response["steps"])
+            )
 
-            # Create the gTTS object
-            tts = gTTS(text=response["response"], lang='iw', slow=False)
 
-            # Save the script into an MP3 file
-            output_file = "welcome.mp3"
-            tts.save(output_file)
 
-            # Play the saved audio file
-            playsound(output_file)
-            os.remove(output_file)
+    async def gesture_sequence(self, steps):
+
+        for step in steps:
+            await asyncio.sleep(1)
+            self.controller.send_fingers(step["fingers"])
+
+    async def speak(self, text):
+        await asyncio.to_thread(self._speak_blocking, text)
+
+
+    def _speak_blocking(self, text):
+        tts = gTTS(text=text, lang='iw', slow=False)
+
+        output_file = "welcome.mp3"
+        tts.save(output_file)
+
+        playsound(output_file)
+        os.remove(output_file)
+
 
             
 

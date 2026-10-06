@@ -9,6 +9,9 @@ import time
 class HandControl:
 
     def __init__(self):
+
+        self.open_flag = [False,False,False,False,False]
+
         self.arduino = serial.Serial(
             '/dev/ttyACM0',
             115200,
@@ -21,7 +24,8 @@ class HandControl:
 
     def send_fingers(self, fingers):
 
-        command = ",".join(str(finger) for finger in fingers)
+        toggle_list = self.fingers_to_toggle(fingers)
+        command = ",".join(str(finger) for finger in toggle_list)
 
         print(command)
         self.arduino.write((command + "\n").encode())
@@ -29,6 +33,20 @@ class HandControl:
         response = self.arduino.readline().decode().strip()
 
         print("Arduino:", response)
+
+    def fingers_to_toggle(self, fingers):
+
+        if not fingers:
+            return
+
+        toggle_list = []
+
+        for finger in range(5):
+            if  self.open_flag[finger] != (finger in fingers):
+                toggle_list += finger
+                self.open_flag[finger] = not self.open_flag[finger]
+
+        return toggle_list
 
 
 # helper = HandControl()
