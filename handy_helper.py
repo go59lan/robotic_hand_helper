@@ -14,8 +14,9 @@ from hand_control import HandControl
 class Helper:
 
     def __init__(self):
-
+        
         self.model = Model()
+        print("model")
         self.controller = HandControl()
         self.mic = None
         self.speaker = None
@@ -36,13 +37,16 @@ class Helper:
                 self.gesture_sequence(response["steps"])
             )
 
+            time.sleep(2)
+            self.controller.send_fingers([5])
+
 
 
     async def gesture_sequence(self, steps):
 
         for step in steps:
-            await asyncio.sleep(1)
             self.controller.send_fingers(step["fingers"])
+            await asyncio.sleep(1)
 
     async def speak(self, text):
         await asyncio.to_thread(self._speak_blocking, text)
@@ -88,4 +92,4 @@ class Helper:
 
 helper = Helper()
 
-helper.listen()
+asyncio.run(helper.listen())
