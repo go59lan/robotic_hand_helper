@@ -46,7 +46,7 @@ class HandControl:
 
         for finger in range(5):
             if  self.open_flag[finger] != (finger in fingers):
-                toggle_list += finger
+                toggle_list += [finger]
                 self.open_flag[finger] = not self.open_flag[finger]
 
         return toggle_list

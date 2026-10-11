@@ -65,10 +65,9 @@ you can show large numbers like 543 by doing a sequence of
     try:
       self.last_interaction = self.client.interactions.create(
         model="gemini-3.8-flash",
-        system_instruction=self.instructions,
-        input="Ready."
+        input=self.instructions
       )
-      print("asked")
+      print(self.last_interaction.output_text)
     except Exception as error:
       # Keep the helper usable: the next query can retry with a new interaction.
       print(f"Could not initialize the model interaction: {error}")
@@ -103,6 +102,5 @@ you can show large numbers like 543 by doing a sequence of
       "steps": [],
     }
     
-
 
     # print(interaction.output_text)
