@@ -67,7 +67,7 @@ you can show large numbers like 543 by doing a sequence of
         model="gemini-3.8-flash",
         input=self.instructions
       )
-      print(self.last_interaction.output_text)
+      print(self.last_interaction)
     except Exception as error:
       # Keep the helper usable: the next query can retry with a new interaction.
       print(f"Could not initialize the model interaction: {error}")

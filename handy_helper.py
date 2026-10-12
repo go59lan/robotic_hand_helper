@@ -1,11 +1,11 @@
 import serial
-import time
 import speech_recognition as sr
 from bidi.algorithm import get_display
 from gtts import gTTS
 import os
 from playsound3 import playsound
 import asyncio
+import tempfile
 
 from google_model import Model
 from hand_control import HandControl
@@ -31,13 +31,20 @@ class Helper:
             print(get_display(text))
 
             response = self.model.query(text)
-            
-            await asyncio.gather(
-                self.speak(response["response"]),
-                self.gesture_sequence(response["steps"])
-            )
 
-            time.sleep(2)
+            # Generate the MP3 before the gesture starts. gTTS is a network
+            # call, so generating it inside speak() delayed audio playback.
+            output_file = await self.prepare_speech(response["response"])
+            try:
+                await asyncio.gather(
+                    self.speak(output_file),
+                    self.gesture_sequence(response["steps"])
+                )
+            finally:
+                if os.path.exists(output_file):
+                    os.remove(output_file)
+
+            await asyncio.sleep(2)
             self.controller.send_fingers([5])
 
 
@@ -45,21 +52,28 @@ class Helper:
     async def gesture_sequence(self, steps):
 
         for step in steps:
-            self.controller.send_fingers(step["fingers"])
+            # Serial reads are blocking, so do not pause audio playback while
+            # waiting for the Arduino response.
+            await asyncio.to_thread(self.controller.send_fingers, step["fingers"])
             await asyncio.sleep(1)
 
-    async def speak(self, text):
-        await asyncio.to_thread(self._speak_blocking, text)
+    async def prepare_speech(self, text):
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as file:
+            output_file = file.name
 
+        try:
+            await asyncio.to_thread(self._create_speech_file, text, output_file)
+            return output_file
+        except Exception:
+            os.remove(output_file)
+            raise
 
-    def _speak_blocking(self, text):
+    async def speak(self, output_file):
+        await asyncio.to_thread(playsound, output_file)
+
+    def _create_speech_file(self, text, output_file):
         tts = gTTS(text=text, lang='iw', slow=False)
-
-        output_file = "welcome.mp3"
         tts.save(output_file)
-
-        playsound(output_file)
-        os.remove(output_file)
 
 
             
