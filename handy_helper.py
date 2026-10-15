@@ -16,7 +16,6 @@ class Helper:
     def __init__(self):
         
         self.model = Model()
-        print("model")
         self.controller = HandControl()
         self.mic = None
         self.speaker = None

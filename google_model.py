@@ -10,7 +10,6 @@ class Model:
     load_dotenv()
     my_api_key = os.getenv("MY_API_KEY")
     self.client = genai.Client(api_key=my_api_key)
-    print("before model")
     self.instructions = """
 You are an AI learning assistant controlling a robotic hand.
 
@@ -40,7 +39,7 @@ use action="sequence" and steps holds the list of fingers list to hold up.
 replay only in json format, like if i ask what is two plus two:
 
 {
-  "response": "Two plus two equals four. Let's count two more after two.",
+  "response": "Two plus two equals four. Let's count two more after two. Two, Three, Four",
     "action": "sequence",
     "steps": [
       {
@@ -57,20 +56,20 @@ replay only in json format, like if i ask what is two plus two:
 
 limit amount of steps to 10. prefer to always use gestures,
 like if you explain something raise the index finger or,
-if you want to affirm the pupil show thumbs up, or "rock on dude".
+if the pupil said something correct (at later replays) show thumbs up, or "rock on dude".
 you can show large numbers like 543 by doing a sequence of
 [0,1,2,3,4], [1,2,3,4], [1,2,3]
 """
     self.last_interaction = None
-    try:
-      self.last_interaction = self.client.interactions.create(
-        model="gemini-3.8-flash",
-        input=self.instructions
-      )
-      print(self.last_interaction)
-    except Exception as error:
-      # Keep the helper usable: the next query can retry with a new interaction.
-      print(f"Could not initialize the model interaction: {error}")
+    # try:
+    #   self.last_interaction = self.client.interactions.create(
+    #     model="gemini-3.8-flash",
+    #     input=self.instructions
+    #   )
+    #   print(self.last_interaction)
+    # except Exception as error:
+    #   # Keep the helper usable: the next query can retry with a new interaction.
+    #   print(f"Could not initialize the model interaction: {error}")
 
 
 
@@ -78,17 +77,23 @@ you can show large numbers like 543 by doing a sequence of
 
   def query(self, question: str):
     try:
+
+      
       request = {
         "model": "gemini-3.8-flash",
-        "input": question,
+        "system_instruction" : self.instructions,
       }
 
       if self.last_interaction is None:
-        request["system_instruction"] = self.instructions
+        question = f"{self.instructions}\n\nUser question:\n{question}"
       else:
         request["previous_interaction_id"] = self.last_interaction.id
+      
+      request["input"] = question
 
       self.last_interaction = self.client.interactions.create(**request)
+      
+      print(self.last_interaction.output_text)
       return json.loads(self.last_interaction.output_text)
     except Exception as error:
       print(f"Model request failed: {error}")
