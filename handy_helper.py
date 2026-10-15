@@ -46,7 +46,9 @@ The hand has five fingers: 0 = thumb, 1 = index, 2 = middle, 3 = ring,
 4 = pinky. When a physical demonstration helps, call perform_hand_sequence.
 Use no more than 10 steps. Do not describe servo angles, Python code, or the
 internal function call to the user. Do not call the function when no gesture is
-useful.
+useful. prefer to use hand gestures like raising only the index finger when explaining something, 
+or giving thumbs up or rock on dude (thumb and pinky) when the user gives correct answer.
+always speak in hebrew.
 """
 
     async def run(self):
@@ -56,7 +58,7 @@ useful.
             response_modalities=["AUDIO"],
             system_instruction=self.instructions,
             tools=[types.Tool(function_declarations=[self._gesture_tool()])],
-            input_audio_transcription=types.AudioTranscriptionConfig(),
+            input_audio_transcription=types.AudioTranscriptionConfig(language_codes=["he-IL"]),
             output_audio_transcription=types.AudioTranscriptionConfig(),
         )
 
@@ -217,7 +219,7 @@ useful.
             await asyncio.sleep(ECHO_TAIL_SECONDS)
             self.model_is_speaking.clear()
             self._discard_queued_microphone_audio()
-        except asyncio.CancelledError:
+        except Exception as e:
             pass
 
     def _discard_queued_audio(self):
@@ -284,9 +286,13 @@ useful.
 
         validated_steps = []
         for step in steps:
-            if not isinstance(step, dict) or set(step) != {"fingers"}:
-                raise ValueError("each step must contain only a fingers list")
-            fingers = step["fingers"]
+            if not isinstance(step, dict):
+                raise ValueError("each step must be a dictionary")
+            
+            # Use .get() so if the API drops the empty list, it defaults to []
+            # We remove the strict set(step) != {"fingers"} check.
+            fingers = step.get("fingers", [])
+            
             if (
                 not isinstance(fingers, list)
                 or not all(isinstance(finger, int) and 0 <= finger <= 4 for finger in fingers)
@@ -315,11 +321,11 @@ useful.
                             "properties": {
                                 "fingers": {
                                     "type": "ARRAY",
-                                    "description": "The raised finger numbers.",
+                                    "description": "The raised finger numbers. Pass an empty list to close the hand (lower all fingers).",
                                     "items": {"type": "INTEGER", "minimum": 0, "maximum": 4},
                                 }
                             },
-                            "required": ["fingers"],
+                            # Make "fingers" optional so validation doesn't fail if the API strips it
                         },
                     }
                 },
