@@ -40,15 +40,27 @@ class Helper:
 
         self.instructions = """
 You are an AI learning assistant controlling a robotic hand. Speak naturally in
-Hebrew and give concise, age-appropriate educational answers.
+Hebrew and give concise, age-appropriate educational answers. ask questions and give suggestions to keep the conversation going.
 
-The hand has five fingers: 0 = thumb, 1 = index, 2 = middle, 3 = ring,
-4 = pinky. When a physical demonstration helps, call perform_hand_sequence.
-Use no more than 10 steps. Do not describe servo angles, Python code, or the
-internal function call to the user. Do not call the function when no gesture is
-useful. prefer to use hand gestures like raising only the index finger when explaining something, 
+You control a robotic hand with five fingers:
+0 = thumb
+1 = index
+2 = middle
+3 = ring
+4 = pinky
+
+GESTURE RULES:
+- Every gesture describes the COMPLETE desired hand position.
+- The fingers listed in "fingers" must be UP.
+- Every finger NOT listed must be DOWN.
+- Never interpret the list as fingers to toggle.
+- An empty list [] means ALL fingers DOWN.
+- To raise all fingers, use [0,1,2,3,4].
+- Each new step replaces the previous hand position.
+- Use perform_hand_sequence when a physical demonstration is useful.
+prefer to use hand gestures like raising only the index finger when explaining something, 
 or giving thumbs up or rock on dude (thumb and pinky) when the user gives correct answer.
-always speak in hebrew.
+ Do full sequences when applicable (like when counting or showing large number). always speak in hebrew.
 """
 
     async def run(self):
@@ -57,7 +69,7 @@ always speak in hebrew.
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             system_instruction=self.instructions,
-            tools=[types.Tool(function_declarations=[self._gesture_tool()])],
+            tools=[types.Tool(function_declarations=[self._gesture_tool(), self._end_session_tool()])],
             input_audio_transcription=types.AudioTranscriptionConfig(language_codes=["he-IL"]),
             output_audio_transcription=types.AudioTranscriptionConfig(),
         )
@@ -87,18 +99,32 @@ always speak in hebrew.
 
         done, pending = await asyncio.wait(
             {sender, player, receiver},
-            # A completed receiver means either the user said goodbye or the
-            # Live session ended, so the other streaming tasks should stop.
             return_when=asyncio.FIRST_COMPLETED,
         )
-        for task in pending:
-            task.cancel()
+        
+        # Unblock the microphone sender gracefully
+        if sender in pending:
+            if self.input_audio.full():
+                self.input_audio.get_nowait()
+            self.input_audio.put_nowait(None)
+            
+        # Unblock the audio player gracefully
+        if player in pending:
+            if self.output_audio.full():
+                self.output_audio.get_nowait()
+            self.output_audio.put_nowait(None)
+
+        # Cancel only the receiver (websocket) if it didn't finish on its own
+        if receiver in pending:
+            receiver.cancel()
+
         await asyncio.gather(*pending, return_exceptions=True)
 
         for task in done:
             exception = task.exception()
             if exception:
                 raise exception
+
 
     def _input_stream(self):
         return sd.RawInputStream(
@@ -136,6 +162,8 @@ always speak in hebrew.
     async def _send_microphone_audio(self, session):
         while True:
             audio = await self.input_audio.get()
+            if audio is None:  # Stop signal received
+                break
             if self.model_is_speaking.is_set():
                 continue
             await session.send_realtime_input(
@@ -145,18 +173,20 @@ always speak in hebrew.
                 )
             )
 
+
     async def _play_model_audio(self, output_stream):
         while True:
             audio = await self.output_audio.get()
+            if audio is None:  # Stop signal received
+                break
             self.output_write_in_progress = True
             try:
                 await asyncio.to_thread(output_stream.write, audio)
             finally:
                 self.output_write_in_progress = False
 
+
     async def _receive_model_events(self, session):
-        # session.receive() ends at the end of each model turn. Start another
-        # receive loop so a normal first answer does not end the whole session.
         while True:
             async for message in session.receive():
                 if message.server_content:
@@ -164,7 +194,10 @@ always speak in hebrew.
                     if should_stop:
                         return
                 if message.tool_call:
-                    await self._handle_tool_calls(session, message.tool_call.function_calls)
+                    # Capture the return value to know if we should stop
+                    should_stop = await self._handle_tool_calls(session, message.tool_call.function_calls)
+                    if should_stop:
+                        return
 
     async def _handle_server_content(self, content):
         if content.input_transcription:
@@ -213,14 +246,24 @@ always speak in hebrew.
 
     async def _resume_microphone_after_playback(self):
 
+        timeout = 30  # seconds
+        start = asyncio.get_running_loop().time()
         try:
             while not self.output_audio.empty() or self.output_write_in_progress:
+                if asyncio.get_running_loop().time() - start > timeout:
+                    print("WARNING: Audio playback timed out")
+                    break
+
                 await asyncio.sleep(0.02)
+    
             await asyncio.sleep(ECHO_TAIL_SECONDS)
             self.model_is_speaking.clear()
             self._discard_queued_microphone_audio()
-        except Exception as e:
+        except asyncio.CancelledError:
+            # Expected behavior when a task is cancelled by _cancel_microphone_resume
             pass
+        except Exception as e:
+            print(f"Unexpected error: {e}")
 
     def _discard_queued_audio(self):
         while not self.output_audio.empty():
@@ -232,16 +275,25 @@ always speak in hebrew.
 
     async def _handle_tool_calls(self, session, function_calls):
         responses = []
+        should_stop = False
+
         for call in function_calls:
             try:
-                if call.name != "perform_hand_sequence":
+                if call.name == "end_session":
+                    print("LLM initiated shutdown sequence based on intent.")
+                    await self._close_hand()
+                    should_stop = True
+                    result = {"result": "Session ended.", "scheduling": "SILENT"}
+                    
+                elif call.name == "perform_hand_sequence":
+                    arguments = call.args if isinstance(call.args, dict) else {}
+                    steps = self._validate_steps(arguments.get("steps"))
+                    task = asyncio.create_task(self._perform_gesture_sequence(steps))
+                    self.gesture_tasks.add(task)
+                    task.add_done_callback(self.gesture_tasks.discard)
+                    result = {"result": "Gesture sequence started.", "scheduling": "SILENT"}
+                else:
                     raise ValueError(f"Unknown tool: {call.name}")
-                arguments = call.args if isinstance(call.args, dict) else {}
-                steps = self._validate_steps(arguments.get("steps"))
-                task = asyncio.create_task(self._perform_gesture_sequence(steps))
-                self.gesture_tasks.add(task)
-                task.add_done_callback(self.gesture_tasks.discard)
-                result = {"result": "Gesture sequence started.", "scheduling": "SILENT"}
             except (TypeError, ValueError) as error:
                 result = {"error": str(error), "scheduling": "SILENT"}
 
@@ -253,8 +305,11 @@ always speak in hebrew.
                 )
             )
 
-        if responses:
+        if responses and not should_stop:
             await session.send_tool_response(function_responses=responses)
+            
+        return should_stop
+
 
     async def _perform_gesture_sequence(self, steps):
         async with self.gesture_lock:
@@ -274,7 +329,13 @@ always speak in hebrew.
             await asyncio.gather(*tasks, return_exceptions=True)
 
         async with self.gesture_lock:
-            await asyncio.to_thread(self.controller.send_fingers, [5])
+            # This now naturally generates the exact command needed to close open fingers
+            await asyncio.to_thread(self.controller.send_fingers, [])
+            
+        # Give the physical servos 1.5 seconds to finish moving before 
+        # the program exits and the Arduino loses its serial connection.
+        await asyncio.sleep(1.5)
+        
         self.hand_closed = True
 
     @staticmethod
@@ -289,17 +350,16 @@ always speak in hebrew.
             if not isinstance(step, dict):
                 raise ValueError("each step must be a dictionary")
             
-            # Use .get() so if the API drops the empty list, it defaults to []
-            # We remove the strict set(step) != {"fingers"} check.
             fingers = step.get("fingers", [])
+            if not isinstance(fingers, list):
+                fingers = []
+                
+            clean_fingers = sorted(list(set([
+                f for f in fingers 
+                if isinstance(f, int) and 0 <= f <= 4
+            ])))
+            validated_steps.append(clean_fingers)
             
-            if (
-                not isinstance(fingers, list)
-                or not all(isinstance(finger, int) and 0 <= finger <= 4 for finger in fingers)
-                or len(set(fingers)) != len(fingers)
-            ):
-                raise ValueError("fingers must be unique integers from 0 through 4")
-            validated_steps.append(fingers)
         return validated_steps
 
     @staticmethod
@@ -335,6 +395,15 @@ always speak in hebrew.
         declaration.behavior = types.Behavior.NON_BLOCKING
         return declaration
 
+    
+    @staticmethod
+    def _end_session_tool():
+        declaration = types.FunctionDeclaration(
+            name="end_session",
+            description="Call this when the user says goodbye, wants to end the conversation, or wants to shut down the robotic hand.",
+            parameters={"type": "OBJECT", "properties": {}}
+        )
+        return declaration
 
 if __name__ == "__main__":
     asyncio.run(Helper().run())

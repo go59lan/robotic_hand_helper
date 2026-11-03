@@ -50,7 +50,7 @@ void openAll() {
 }
 
 void closeAll() {
-    for (int i = 4; i <= 0; i--) {
+    for (int i = 4; i >= 0; i--) {
         setFinger(i, false);
     }
 }
