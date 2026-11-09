@@ -133,9 +133,11 @@ class Helper:
         await asyncio.gather(*pending, return_exceptions=True)
 
         for task in done:
-            exception = task.exception()
-            if exception:
-                raise exception
+
+            if not task.cancelled():
+                exception = task.exception()
+                if exception:
+                    raise exception
 
 
     def _input_stream(self):
