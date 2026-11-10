@@ -20,6 +20,9 @@
     --think-bg: #fdf2d8;
     --idle: #9a97a3;
     --idle-bg: #eeedf1;
+    --palm: #f1e4d1;
+    --finger-up: #f5913e;
+    --finger-down: #e2d4bf;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -30,8 +33,8 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 4vh 5vw;
-    gap: 4vh;
+    padding: 3vh 5vw;
+    gap: 2vh;
     overflow: hidden;
   }
 
@@ -104,9 +107,44 @@
     transition: height .1s;
   }
 
+  /* Stage: the big caption next to a mirror of the physical hand. */
+  #stage {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6vw;
+  }
+  #caption {
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+    color: var(--text);
+  }
+  #caption:empty { display: none; }
+  #caption.pop { animation: pop .35s ease-out; }
+  @keyframes pop {
+    from { transform: scale(.6); opacity: 0; }
+    to   { transform: scale(1); opacity: 1; }
+  }
+  #hand { height: min(42vh, 60vw); width: auto; }
+  #hand.mirrored { transform: scaleX(-1); }
+  #hand .palm { fill: var(--palm); }
+  #hand .finger {
+    fill: var(--finger-down);
+    transform-box: fill-box;
+    transform-origin: 50% 100%;
+    transform: scaleY(.42);
+    transition: transform .35s ease-out, fill .35s;
+  }
+  #hand .finger.up { fill: var(--finger-up); transform: scaleY(1); }
+
   /* Subtitles */
   #talk {
-    flex: 1;
+    flex: none;
+    max-height: 34vh;
     width: min(1100px, 100%);
     display: flex;
     flex-direction: column;
@@ -123,7 +161,7 @@
   #you {
     align-self: flex-start;
     max-width: 85%;
-    max-height: 22vh;
+    max-height: 10vh;
     background: var(--card);
     border-radius: 1.4rem;
     padding: .9rem 1.5rem;
@@ -133,8 +171,8 @@
   }
   #you:empty, #handy:empty { visibility: hidden; }
   #handy {
-    max-height: 42vh;
-    font-size: clamp(1.8rem, 4.4vw, 3.4rem);
+    max-height: 22vh;
+    font-size: clamp(1.6rem, 3.8vw, 3rem);
     line-height: 1.45;
     font-weight: 500;
   }
@@ -154,12 +192,31 @@
   <span id="meter" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></span>
 </div>
 
+<div id="stage">
+  <div id="caption" dir="auto"></div>
+  <!-- Fingers are drawn under the palm so a lowered finger shows as a knuckle. -->
+  <svg id="hand" viewBox="-40 0 280 290" aria-label="מצב היד">
+    <rect class="finger" data-finger="1" x="50" y="40" width="36" height="150" rx="18"/>
+    <rect class="finger" data-finger="2" x="90" y="22" width="36" height="168" rx="18"/>
+    <rect class="finger" data-finger="3" x="130" y="36" width="36" height="154" rx="18"/>
+    <rect class="finger" data-finger="4" x="170" y="70" width="32" height="120" rx="16"/>
+    <g transform="translate(64 240) rotate(-35)">
+      <rect class="finger" data-finger="0" x="-19" y="-125" width="38" height="125" rx="19"/>
+    </g>
+    <rect class="palm" x="44" y="140" width="162" height="140" rx="44"/>
+  </svg>
+</div>
+
 <div id="talk">
   <div id="you" class="line"></div>
   <div id="handy" class="line"></div>
 </div>
 
 <script>
+  // Which side the thumb is on, as the child sees the physical hand.
+  // Set to false if the real hand has its thumb on the child's right.
+  const THUMB_ON_LEFT = true;
+
   const LABELS = {
     offline: "במנוחה",
     connecting: "מתחברים...",
@@ -174,6 +231,23 @@
   const handy = document.getElementById("handy");
   const bars = document.querySelectorAll("#meter span");
   const barShape = [0.55, 0.85, 1, 0.8, 0.6];
+  const caption = document.getElementById("caption");
+  const handSvg = document.getElementById("hand");
+  const fingers = handSvg.querySelectorAll(".finger");
+  handSvg.classList.toggle("mirrored", !THUMB_ON_LEFT);
+
+  function setHand({ fingers: up, caption: text }) {
+    fingers.forEach((el) => el.classList.toggle("up", up.includes(Number(el.dataset.finger))));
+    if (caption.textContent !== text) {
+      caption.textContent = text;
+      // Short numbers get huge; longer math like "2 + 2 = 4" a bit smaller.
+      const size = text.length <= 2 ? 30 : text.length <= 4 ? 22 : text.length <= 9 ? 13 : 8;
+      caption.style.fontSize = `min(${size}vh, ${size * 0.9}vw)`;
+      caption.classList.remove("pop");
+      void caption.offsetWidth;  // restart the animation
+      caption.classList.add("pop");
+    }
+  }
 
   function setState(state) {
     status.dataset.state = state;
@@ -196,6 +270,7 @@
       // A new run starts with a clean screen; the server replays what's current.
       you.textContent = "";
       handy.textContent = "";
+      setHand({ fingers: [], caption: "" });
     };
     ws.onmessage = (event) => {
       const { type, value } = JSON.parse(event.data);
@@ -203,6 +278,7 @@
       else if (type === "level") setLevel(value);
       else if (type === "you") you.textContent = value;
       else if (type === "handy") handy.textContent = value;
+      else if (type === "hand") setHand(value);
     };
     ws.onclose = () => {
       // The program stopped (or hasn't started yet): show "resting" and keep

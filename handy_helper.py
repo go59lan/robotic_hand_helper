@@ -2,6 +2,7 @@ import array
 import asyncio
 import math
 import os
+import re
 
 import sounddevice as sd
 from dotenv import load_dotenv
@@ -18,10 +19,17 @@ INPUT_SAMPLE_RATE = 16_000
 OUTPUT_SAMPLE_RATE = 24_000
 INPUT_BLOCK_SIZE = 320  # 20 ms of 16 kHz mono audio
 ECHO_TAIL_SECONDS = 0.5
+# If Gemini stops sending audio but never sends turn_complete, reopen the mic
+# after this much quiet so the child isn't locked out.
+MISSING_TURN_END_SECONDS = 3
 PLAYBACK_STALL_SECONDS = 5  # give up waiting if playback makes no progress
 SPEECH_RMS = 600  # mic loudness (int16 RMS) that counts as the child talking
 LEVEL_INTERVAL_SECONDS = 0.1  # how often the screen's mic meter updates
 THINKING_SILENCE_SECONDS = 0.7  # quiet time after the child spoke = "thinking"
+MAX_CAPTION_LENGTH = 24
+# Transcripts sometimes contain markup like "<no speech>" or "{pause}". The
+# last alternative hides a tag that is still arriving ("<no").
+TRANSCRIPT_MARKUP = re.compile(r"<[^<>]*>|\{[^{}]*\}|[<{][^<>{}]*$")
 
 
 class Helper:
@@ -101,6 +109,15 @@ class Helper:
         - For a problem, show every number in it. Example: "2+2" = [1,2], then [1,2].
         - When the child answers correctly, FIRST show their number, THEN celebrate, in the same call. Example for the answer 4: steps [1,2,3,4], then [0].
         - When the child answers incorrectly, show the correct number when you reveal it.
+
+        SCREEN CAPTIONS:
+        The child also sees a screen. Each step can have a short "caption" that appears there in big letters, next to a picture of the hand.
+        - Whenever a step shows a number, give it a caption with that number, so the child sees it on the hand AND on the screen.
+        - For a problem, caption it with digits and symbols, and use "?" for the part the child should find. Example: "2+2" = [1,2] with caption "2", then [1,2] with caption "2 + 2 = ?".
+        - When the child answers, show the full solution. Example for the answer 4: [1,2,3,4] with caption "2 + 2 = 4", then [0].
+        - For a multi-digit number, put the whole number on every step. Example: 42 = [1,2,3,4] with caption "42", then [1,2] with caption "42".
+        - A step without a caption keeps the previous caption of the same call. Gestures that are not about numbers need no caption.
+        - Keep captions short: numbers, math, or one or two words. Never put your spoken sentence in a caption.
 
         OTHER GESTURES:
         Use the hand often to feel alive, like an animated character:
@@ -306,7 +323,7 @@ class Helper:
 
         if content.turn_complete:
             self.new_handy_line = True
-            self._schedule_microphone_resume()
+            self._schedule_microphone_resume(ECHO_TAIL_SECONDS)
 
         if not content.model_turn:
             return False
@@ -317,7 +334,9 @@ class Helper:
                 self.model_is_speaking.set()
                 self.heard_child = False
                 self._set_screen_state("speaking")
-                self._cancel_microphone_resume()
+                # turn_complete normally reopens the mic; this is the fallback
+                # in case it never arrives. Each new chunk restarts the wait.
+                self._schedule_microphone_resume(MISSING_TURN_END_SECONDS)
                 self.output_audio.put_nowait(audio)
 
         return False
@@ -330,7 +349,7 @@ class Helper:
         self.child_text += text
         self.heard_child = True
         self.new_handy_line = True
-        self.screen.send("you", self.child_text)
+        self.screen.send("you", self._clean_transcript(self.child_text))
 
     def _show_handy_words(self, text):
         if self.new_handy_line:
@@ -338,12 +357,16 @@ class Helper:
             self.new_handy_line = False
         self.handy_text += text
         self.new_child_line = True
-        self.screen.send("handy", self.handy_text)
+        self.screen.send("handy", self._clean_transcript(self.handy_text))
 
-    def _schedule_microphone_resume(self):
+    @staticmethod
+    def _clean_transcript(text):
+        return " ".join(TRANSCRIPT_MARKUP.sub(" ", text).split())
+
+    def _schedule_microphone_resume(self, quiet_seconds):
         self._cancel_microphone_resume()
         self.resume_microphone_task = asyncio.create_task(
-            self._resume_microphone_after_playback()
+            self._resume_microphone_after_playback(quiet_seconds)
         )
 
     def _cancel_microphone_resume(self):
@@ -351,7 +374,7 @@ class Helper:
             self.resume_microphone_task.cancel()
         self.resume_microphone_task = None
 
-    async def _resume_microphone_after_playback(self):
+    async def _resume_microphone_after_playback(self, quiet_seconds):
 
         loop = asyncio.get_running_loop()
         # Long answers are fine; only give up if playback stops progressing.
@@ -364,7 +387,9 @@ class Helper:
 
                 await asyncio.sleep(0.02)
     
-            await asyncio.sleep(ECHO_TAIL_SECONDS)
+            await asyncio.sleep(quiet_seconds)
+            if quiet_seconds == MISSING_TURN_END_SECONDS:
+                print("No turn_complete from Gemini; reopening the mic.")
             self.model_is_speaking.clear()
             self._set_screen_state("listening")
             self._discard_queued_microphone_audio()
@@ -426,7 +451,13 @@ class Helper:
 
     async def _perform_gesture_sequence(self, steps):
         async with self.gesture_lock:
-            for fingers in steps:
+            # Each call starts with a clean caption; steps without one keep
+            # the caption of the step before (e.g. a thumbs up after "4").
+            caption = ""
+            for fingers, step_caption in steps:
+                if step_caption is not None:
+                    caption = step_caption
+                self.screen.send("hand", {"fingers": fingers, "caption": caption})
                 await asyncio.to_thread(self.controller.send_fingers, fingers)
                 await asyncio.sleep(1)
 
@@ -442,6 +473,7 @@ class Helper:
             await asyncio.gather(*tasks, return_exceptions=True)
 
         async with self.gesture_lock:
+            self.screen.send("hand", {"fingers": [], "caption": ""})
             await asyncio.to_thread(self.controller.send_fingers, [])
             
         # Give the physical servos 1.5 seconds to finish moving before 
@@ -477,9 +509,19 @@ class Helper:
                 if finger != int(finger) or not 0 <= finger <= 4:
                     raise ValueError(f"finger must be a whole number 0-4, got {finger!r}")
                 clean_fingers.add(int(finger))
-            validated_steps.append(sorted(clean_fingers))
+            validated_steps.append((sorted(clean_fingers), Helper._clean_caption(step.get("caption"))))
             
         return validated_steps
+
+    @staticmethod
+    def _clean_caption(caption):
+        """Return the caption as short text, or None when the step has none."""
+        if caption is None or isinstance(caption, bool):
+            return None
+        if isinstance(caption, float) and caption == int(caption):
+            caption = int(caption)  # the model may send the number 4 as 4.0
+        caption = str(caption).strip()
+        return caption[:MAX_CAPTION_LENGTH] or None
 
     @staticmethod
     def _gesture_tool():
@@ -503,7 +545,11 @@ class Helper:
                                     "type": "ARRAY",
                                     "description": "The raised finger numbers. Pass an empty list to close the hand (lower all fingers).",
                                     "items": {"type": "INTEGER", "minimum": 0, "maximum": 4},
-                                }
+                                },
+                                "caption": {
+                                    "type": "STRING",
+                                    "description": "Optional short text shown big on the screen for this step, e.g. \"4\" or \"2 + 2 = ?\". Use it whenever the step shows a number.",
+                                },
                             },
                             # Make "fingers" optional so validation doesn't fail if the API strips it
                         },
