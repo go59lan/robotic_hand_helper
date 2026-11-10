@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 
@@ -13,7 +14,7 @@ class HandControl:
         self.lock = threading.Lock()
 
         self.arduino = serial.Serial(
-            '/dev/ttyACM0',
+            os.getenv("HAND_SERIAL_PORT", "/dev/ttyACM0"),
             115200,
             timeout=1
         )
@@ -36,3 +37,8 @@ class HandControl:
 
         if response != "OK":
             print(f"WARNING: Arduino did not confirm {command!r}: {response!r}")
+
+
+    def close(self):
+        with self.lock:
+            self.arduino.close()

@@ -15,6 +15,7 @@ INPUT_SAMPLE_RATE = 16_000
 OUTPUT_SAMPLE_RATE = 24_000
 INPUT_BLOCK_SIZE = 320  # 20 ms of 16 kHz mono audio
 ECHO_TAIL_SECONDS = 0.5
+PLAYBACK_STALL_SECONDS = 5  # give up waiting if playback makes no progress
 
 
 class Helper:
@@ -29,13 +30,16 @@ class Helper:
         self.client = genai.Client(api_key=api_key)
         self.controller = HandControl()
         self.input_audio = asyncio.Queue(maxsize=100)
-        self.output_audio = asyncio.Queue(maxsize=200)
+        # Unbounded: the model sends speech faster than real time, and dropping
+        # chunks would skip words in the middle of an answer.
+        self.output_audio = asyncio.Queue()
         self.gesture_lock = asyncio.Lock()
         self.audio_loop = None
         self.gesture_tasks = set()
-        self.hand_closed = False
+        self.hand_shut_down = False
         self.model_is_speaking = asyncio.Event()
         self.output_write_in_progress = False
+        self.last_playback_progress = 0.0
         self.resume_microphone_task = None
 
         self.instructions = """
@@ -100,11 +104,11 @@ class Helper:
             # asyncio.run() turns Ctrl+C into cancellation of this task. Close
             # the physical hand before allowing the program to exit.
             print("Stopping: closing the hand.")
-            await self._close_hand()
+            await self._shutdown_hand()
             raise
         finally:
             self._cancel_microphone_resume()
-            await self._close_hand()
+            await self._shutdown_hand()
 
     async def _run_session(self, session, output_stream):
         sender = asyncio.create_task(self._send_microphone_audio(session))
@@ -127,8 +131,6 @@ class Helper:
 
         # Unblock the audio player gracefully
         if player in pending:
-            if self.output_audio.full():
-                self.output_audio.get_nowait()
             self.output_audio.put_nowait(None)
 
         # Cancel only the receiver (websocket) if it didn't finish on its own
@@ -201,6 +203,7 @@ class Helper:
                 await asyncio.to_thread(output_stream.write, audio)
             finally:
                 self.output_write_in_progress = False
+                self.last_playback_progress = asyncio.get_running_loop().time()
 
 
     async def _receive_model_events(self, session):
@@ -220,10 +223,6 @@ class Helper:
         if content.input_transcription:
             transcript = content.input_transcription.text
             print(get_display(f"You: {transcript}"))
-            if "להתראות" in transcript:
-                print("Goodbye detected. Closing the hand and ending the session.")
-                await self._close_hand()
-                return True
         if content.output_transcription:
             print(get_display(f"Gemini: {content.output_transcription.text}"))
 
@@ -243,9 +242,6 @@ class Helper:
                 audio = part.inline_data.data
                 self.model_is_speaking.set()
                 self._cancel_microphone_resume()
-                if self.output_audio.full():
-                    # Dropping old audio is preferable to speaking far behind.
-                    self.output_audio.get_nowait()
                 self.output_audio.put_nowait(audio)
 
         return False
@@ -263,12 +259,13 @@ class Helper:
 
     async def _resume_microphone_after_playback(self):
 
-        timeout = 30  # seconds
-        start = asyncio.get_running_loop().time()
+        loop = asyncio.get_running_loop()
+        # Long answers are fine; only give up if playback stops progressing.
+        self.last_playback_progress = loop.time()
         try:
             while not self.output_audio.empty() or self.output_write_in_progress:
-                if asyncio.get_running_loop().time() - start > timeout:
-                    print("WARNING: Audio playback timed out")
+                if loop.time() - self.last_playback_progress > PLAYBACK_STALL_SECONDS:
+                    print("WARNING: Audio playback stalled")
                     break
 
                 await asyncio.sleep(0.02)
@@ -298,13 +295,17 @@ class Helper:
             try:
                 if call.name == "end_session":
                     print("LLM initiated shutdown sequence based on intent.")
-                    await self._close_hand()
+                    await self._shutdown_hand()
                     should_stop = True
                     result = {"result": "Session ended.", "scheduling": "SILENT"}
                     
                 elif call.name == "perform_hand_sequence":
                     arguments = call.args if isinstance(call.args, dict) else {}
                     steps = self._validate_steps(arguments.get("steps"))
+                    # The newest gesture wins, so the hand doesn't fall
+                    # behind the speech when the model gestures often.
+                    for old_task in self.gesture_tasks:
+                        old_task.cancel()
                     task = asyncio.create_task(self._perform_gesture_sequence(steps))
                     self.gesture_tasks.add(task)
                     task.add_done_callback(self.gesture_tasks.discard)
@@ -334,9 +335,9 @@ class Helper:
                 await asyncio.to_thread(self.controller.send_fingers, fingers)
                 await asyncio.sleep(1)
 
-    async def _close_hand(self):
-        """Cancel active gestures, then put the hand in its closed position."""
-        if self.hand_closed:
+    async def _shutdown_hand(self):
+        """Cancel active gestures, close the hand and release the serial port."""
+        if self.hand_shut_down:
             return
 
         tasks = tuple(self.gesture_tasks)
@@ -346,14 +347,14 @@ class Helper:
             await asyncio.gather(*tasks, return_exceptions=True)
 
         async with self.gesture_lock:
-            # This now naturally generates the exact command needed to close open fingers
             await asyncio.to_thread(self.controller.send_fingers, [])
             
         # Give the physical servos 1.5 seconds to finish moving before 
         # the program exits and the Arduino loses its serial connection.
         await asyncio.sleep(1.5)
-        
-        self.hand_closed = True
+
+        self.controller.close()
+        self.hand_shut_down = True
 
     @staticmethod
     def _validate_steps(steps):
@@ -367,15 +368,21 @@ class Helper:
             if not isinstance(step, dict):
                 raise ValueError("each step must be a dictionary")
             
+            # A missing "fingers" means a closed hand (the API may strip an
+            # empty list).
             fingers = step.get("fingers", [])
             if not isinstance(fingers, list):
-                fingers = []
-                
-            clean_fingers = sorted(list(set([
-                f for f in fingers 
-                if isinstance(f, int) and 0 <= f <= 4
-            ])))
-            validated_steps.append(clean_fingers)
+                raise ValueError("fingers must be a list")
+
+            clean_fingers = set()
+            for finger in fingers:
+                # JSON numbers may arrive as floats (1.0); bools are not fingers.
+                if isinstance(finger, bool) or not isinstance(finger, (int, float)):
+                    raise ValueError(f"invalid finger: {finger!r}")
+                if finger != int(finger) or not 0 <= finger <= 4:
+                    raise ValueError(f"finger must be a whole number 0-4, got {finger!r}")
+                clean_fingers.add(int(finger))
+            validated_steps.append(sorted(clean_fingers))
             
         return validated_steps
 
