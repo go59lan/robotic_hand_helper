@@ -3,3 +3,4 @@ pyserial
 python-dotenv
 sounddevice
 python-bidi
+aiohttp

@@ -1,4 +1,6 @@
+import array
 import asyncio
+import math
 import os
 
 import sounddevice as sd
@@ -8,6 +10,7 @@ from google.genai import types
 from bidi.algorithm import get_display
 
 from hand_control import HandControl
+from screen import Screen
 
 
 MODEL = "gemini-3.8-live"
@@ -16,6 +19,9 @@ OUTPUT_SAMPLE_RATE = 24_000
 INPUT_BLOCK_SIZE = 320  # 20 ms of 16 kHz mono audio
 ECHO_TAIL_SECONDS = 0.5
 PLAYBACK_STALL_SECONDS = 5  # give up waiting if playback makes no progress
+SPEECH_RMS = 600  # mic loudness (int16 RMS) that counts as the child talking
+LEVEL_INTERVAL_SECONDS = 0.1  # how often the screen's mic meter updates
+THINKING_SILENCE_SECONDS = 0.7  # quiet time after the child spoke = "thinking"
 
 
 class Helper:
@@ -41,6 +47,16 @@ class Helper:
         self.output_write_in_progress = False
         self.last_playback_progress = 0.0
         self.resume_microphone_task = None
+
+        self.screen = Screen()
+        self.screen_state = None
+        self.child_text = ""
+        self.handy_text = ""
+        self.new_child_line = True
+        self.new_handy_line = True
+        self.heard_child = False
+        self.last_level_time = 0.0
+        self.last_loud_time = 0.0
 
         self.instructions = """
         You are an enthusiastic, warm, and playful AI tutor controlling a physical robotic hand. You are giving a one-on-one private lesson to an elementary school student.
@@ -118,11 +134,14 @@ class Helper:
 
         print("Connecting to Gemini Live. Start speaking; press Ctrl+C to stop.")
         try:
+            await self.screen.start()
+            self._set_screen_state("connecting")
             async with self.client.aio.live.connect(
                 model=MODEL,
                 config=config,
             ) as session:
                 with self._input_stream(), self._output_stream() as output_stream:
+                    self._set_screen_state("listening")
                     await self._run_session(session, output_stream)
         except asyncio.CancelledError:
             # asyncio.run() turns Ctrl+C into cancellation of this task. Close
@@ -132,7 +151,15 @@ class Helper:
             raise
         finally:
             self._cancel_microphone_resume()
+            self._set_screen_state("bye")
             await self._shutdown_hand()
+            await self.screen.close()
+
+    def _set_screen_state(self, state):
+        """Show the child whose turn it is: connecting, listening, thinking, speaking or bye."""
+        if state != self.screen_state:
+            self.screen_state = state
+            self.screen.send("state", state)
 
     async def _run_session(self, session, output_stream):
         sender = asyncio.create_task(self._send_microphone_audio(session))
@@ -199,10 +226,28 @@ class Helper:
             # This is speaker audio picked up by the microphone. Do not send it
             # back to Gemini as though it were another user request.
             return
+        self._update_microphone_level(audio)
         if self.input_audio.full():
             # Prefer recent audio rather than building up a delayed conversation.
             self.input_audio.get_nowait()
         self.input_audio.put_nowait(audio)
+
+    def _update_microphone_level(self, audio):
+        now = self.audio_loop.time()
+        samples = array.array("h", audio)
+        rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples)) if samples else 0
+        if rms > SPEECH_RMS:
+            self.last_loud_time = now
+            if self.screen_state == "thinking":
+                self._set_screen_state("listening")
+        elif (self.heard_child and self.screen_state == "listening"
+              and now - self.last_loud_time > THINKING_SILENCE_SECONDS):
+            # The child spoke and then went quiet: Gemini is working on a reply.
+            self._set_screen_state("thinking")
+
+        if now - self.last_level_time >= LEVEL_INTERVAL_SECONDS:
+            self.last_level_time = now
+            self.screen.send("level", round(min(1.0, rms / (SPEECH_RMS * 4)), 2))
 
     async def _send_microphone_audio(self, session):
         while True:
@@ -244,18 +289,23 @@ class Helper:
                         return
 
     async def _handle_server_content(self, content):
-        if content.input_transcription:
+        if content.input_transcription and content.input_transcription.text:
             transcript = content.input_transcription.text
             print(get_display(f"You: {transcript}"))
-        if content.output_transcription:
-            print(get_display(f"Gemini: {content.output_transcription.text}"))
+            self._show_child_words(transcript)
+        if content.output_transcription and content.output_transcription.text:
+            transcript = content.output_transcription.text
+            print(get_display(f"Gemini: {transcript}"))
+            self._show_handy_words(transcript)
 
         if content.interrupted:
             self._discard_queued_audio()
             self._cancel_microphone_resume()
             self.model_is_speaking.clear()
+            self._set_screen_state("listening")
 
         if content.turn_complete:
+            self.new_handy_line = True
             self._schedule_microphone_resume()
 
         if not content.model_turn:
@@ -265,10 +315,30 @@ class Helper:
             if part.inline_data and part.inline_data.data:
                 audio = part.inline_data.data
                 self.model_is_speaking.set()
+                self.heard_child = False
+                self._set_screen_state("speaking")
                 self._cancel_microphone_resume()
                 self.output_audio.put_nowait(audio)
 
         return False
+
+    def _show_child_words(self, text):
+        # Transcripts arrive in small pieces; join them into one line per turn.
+        if self.new_child_line:
+            self.child_text = ""
+            self.new_child_line = False
+        self.child_text += text
+        self.heard_child = True
+        self.new_handy_line = True
+        self.screen.send("you", self.child_text)
+
+    def _show_handy_words(self, text):
+        if self.new_handy_line:
+            self.handy_text = ""
+            self.new_handy_line = False
+        self.handy_text += text
+        self.new_child_line = True
+        self.screen.send("handy", self.handy_text)
 
     def _schedule_microphone_resume(self):
         self._cancel_microphone_resume()
@@ -296,6 +366,7 @@ class Helper:
     
             await asyncio.sleep(ECHO_TAIL_SECONDS)
             self.model_is_speaking.clear()
+            self._set_screen_state("listening")
             self._discard_queued_microphone_audio()
         except asyncio.CancelledError:
             # Expected behavior when a task is cancelled by _cancel_microphone_resume

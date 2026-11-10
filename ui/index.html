@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Handy Helper</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #fdf8f0;
+    --card: #ffffff;
+    --text: #2b2a33;
+    --muted: #7a7785;
+    --listen: #2fb36b;
+    --listen-bg: #e3f7ec;
+    --speak: #3b7be0;
+    --speak-bg: #e4eefc;
+    --think: #e0a019;
+    --think-bg: #fdf2d8;
+    --idle: #9a97a3;
+    --idle-bg: #eeedf1;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Rubik", "Noto Sans Hebrew", "Arial", sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 4vh 5vw;
+    gap: 4vh;
+    overflow: hidden;
+  }
+
+  /* Whose turn is it? The biggest, clearest thing on the screen. */
+  #status {
+    --c: var(--idle);
+    --c-bg: var(--idle-bg);
+    display: flex;
+    align-items: center;
+    gap: 1.2rem;
+    padding: 1.1rem 2.4rem;
+    border-radius: 999px;
+    background: var(--c-bg);
+    color: var(--c);
+    font-size: clamp(1.8rem, 4.5vw, 3.2rem);
+    font-weight: 700;
+    transition: background .3s, color .3s;
+  }
+  #status[data-state="listening"] { --c: var(--listen); --c-bg: var(--listen-bg); }
+  #status[data-state="speaking"]  { --c: var(--speak);  --c-bg: var(--speak-bg); }
+  #status[data-state="thinking"]  { --c: var(--think);  --c-bg: var(--think-bg); }
+
+  .icon { width: 1.4em; height: 1.4em; flex: none; position: relative; }
+  .icon svg { width: 100%; height: 100%; display: none; }
+  #status[data-state="listening"] .i-mic,
+  #status[data-state="speaking"] .i-speaker,
+  #status[data-state="thinking"] .i-dots,
+  #status[data-state="connecting"] .i-dots,
+  #status[data-state="bye"] .i-wave,
+  #status[data-state="offline"] .i-moon { display: block; }
+
+  /* Pulsing ring around the mic while it is recording. */
+  #status[data-state="listening"] .icon::after {
+    content: "";
+    position: absolute;
+    inset: -0.35em;
+    border-radius: 50%;
+    border: 0.12em solid var(--listen);
+    animation: pulse 1.6s ease-out infinite;
+  }
+  @keyframes pulse {
+    from { transform: scale(.8); opacity: .8; }
+    to   { transform: scale(1.4); opacity: 0; }
+  }
+
+  .i-dots circle { animation: bounce 1.2s infinite ease-in-out; }
+  .i-dots circle:nth-child(2) { animation-delay: .15s; }
+  .i-dots circle:nth-child(3) { animation-delay: .3s; }
+  @keyframes bounce {
+    0%, 80%, 100% { transform: translateY(0); }
+    40% { transform: translateY(-4px); }
+  }
+  .i-speaker .wave { animation: wave 1s infinite ease-in-out; }
+  .i-speaker .wave2 { animation-delay: .2s; }
+  @keyframes wave { 50% { opacity: .25; } }
+
+  /* Mic level meter: shows the child that the computer hears them. */
+  #meter {
+    display: none;
+    align-items: center;
+    gap: .18em;
+    height: 1.2em;
+  }
+  #status[data-state="listening"] #meter { display: flex; }
+  #meter span {
+    width: .22em;
+    height: 20%;
+    border-radius: .11em;
+    background: currentColor;
+    transition: height .1s;
+  }
+
+  /* Subtitles */
+  #talk {
+    flex: 1;
+    width: min(1100px, 100%);
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 2.5vh;
+    min-height: 0;
+  }
+  .line {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    overflow: hidden;
+  }
+  #you {
+    align-self: flex-start;
+    max-width: 85%;
+    max-height: 22vh;
+    background: var(--card);
+    border-radius: 1.4rem;
+    padding: .9rem 1.5rem;
+    font-size: clamp(1.2rem, 2.6vw, 1.9rem);
+    color: var(--muted);
+    box-shadow: 0 2px 10px rgba(60, 50, 90, .08);
+  }
+  #you:empty, #handy:empty { visibility: hidden; }
+  #handy {
+    max-height: 42vh;
+    font-size: clamp(1.8rem, 4.4vw, 3.4rem);
+    line-height: 1.45;
+    font-weight: 500;
+  }
+</style>
+</head>
+<body>
+
+<div id="status" data-state="offline" role="status" aria-live="polite">
+  <span class="icon" aria-hidden="true">
+    <svg class="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4"/><path d="M8 21h8"/></svg>
+    <svg class="i-speaker" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h4l5-4v14l-5-4H4z"/><path class="wave" d="M16 9a4 4 0 0 1 0 6"/><path class="wave wave2" d="M19 6a8 8 0 0 1 0 12"/></svg>
+    <svg class="i-dots" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2.4"/><circle cx="12" cy="12" r="2.4"/><circle cx="19" cy="12" r="2.4"/></svg>
+    <svg class="i-wave" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12"/><path d="M11 11.5v-2a1.5 1.5 0 0 1 3 0V12"/><path d="M14 10.5a1.5 1.5 0 0 1 3 0V12"/><path d="M17 11.5a1.5 1.5 0 0 1 3 0V16a6 6 0 0 1-6 6h-2a6 6 0 0 1-5-2.7L4.3 15a1.5 1.5 0 0 1 2.4-1.8L8 15"/></svg>
+    <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"/></svg>
+  </span>
+  <span id="label">במנוחה</span>
+  <span id="meter" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></span>
+</div>
+
+<div id="talk">
+  <div id="you" class="line"></div>
+  <div id="handy" class="line"></div>
+</div>
+
+<script>
+  const LABELS = {
+    offline: "במנוחה",
+    connecting: "מתחברים...",
+    listening: "תורך לדבר",
+    thinking: "רק רגע...",
+    speaking: "עכשיו מקשיבים",
+    bye: "להתראות!",
+  };
+  const status = document.getElementById("status");
+  const label = document.getElementById("label");
+  const you = document.getElementById("you");
+  const handy = document.getElementById("handy");
+  const bars = document.querySelectorAll("#meter span");
+  const barShape = [0.55, 0.85, 1, 0.8, 0.6];
+
+  function setState(state) {
+    status.dataset.state = state;
+    label.textContent = LABELS[state] || "";
+    if (state !== "listening") setLevel(0);
+  }
+
+  let level = 0;
+  function setLevel(value) {
+    // Rise fast, fall slowly, so the bars look lively but not jittery.
+    level = value > level ? value : level * 0.6 + value * 0.4;
+    bars.forEach((bar, i) => {
+      bar.style.height = Math.max(20, Math.round(level * barShape[i] * 100)) + "%";
+    });
+  }
+
+  function connect() {
+    const ws = new WebSocket(`ws://${location.host}/ws`);
+    ws.onopen = () => {
+      // A new run starts with a clean screen; the server replays what's current.
+      you.textContent = "";
+      handy.textContent = "";
+    };
+    ws.onmessage = (event) => {
+      const { type, value } = JSON.parse(event.data);
+      if (type === "state") setState(value);
+      else if (type === "level") setLevel(value);
+      else if (type === "you") you.textContent = value;
+      else if (type === "handy") handy.textContent = value;
+    };
+    ws.onclose = () => {
+      // The program stopped (or hasn't started yet): show "resting" and keep
+      // trying, so the page comes back by itself on the next run.
+      if (status.dataset.state === "bye") setTimeout(() => setState("offline"), 5000);
+      else setState("offline");
+      setTimeout(connect, 1000);
+    };
+  }
+  connect();
+</script>
+</body>
+</html>
