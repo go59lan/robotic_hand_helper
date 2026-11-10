@@ -35,14 +35,6 @@ void setFinger(int finger, bool open) {
     fingerOpen[finger] = open;
 }
 
-void toggleFinger(int finger) {
-
-    if (finger < 0 || finger > 4)
-        return;
-
-    setFinger(finger, !fingerOpen[finger]);
-}
-
 void openAll() {
     for (int i = 0; i < 5; i++) {
         setFinger(i, true);
@@ -62,35 +54,23 @@ void processCommand(String command) {
     if (command.length() == 0)
         return;
 
-    // Example command:
-    // "0,1,2"
+    // The command is the complete hand position, one character per finger:
+    // "10100" -> thumb and middle open, the rest closed.
 
-    int start = 0;
+    if (command.length() != 5) {
+        Serial.println("ERR");
+        return;
+    }
 
-    while (start < command.length()) {
-
-        int comma = command.indexOf(',', start);
-
-        String number;
-
-        if (comma == -1) {
-            number = command.substring(start);
-            start = command.length();
+    for (int i = 0; i < 5; i++) {
+        if (command[i] != '0' && command[i] != '1') {
+            Serial.println("ERR");
+            return;
         }
-        else {
-            number = command.substring(start, comma);
-            start = comma + 1;
-        }
+    }
 
-        int finger = number.toInt();
-
-            if(finger == 5)
-            {
-                closeAll();
-                break;
-            }
-
-        toggleFinger(finger);
+    for (int i = 0; i < 5; i++) {
+        setFinger(i, command[i] == '1');
     }
 
     Serial.println("OK");
@@ -102,6 +82,9 @@ void setup() {
 
     pwm.begin();
     pwm.setPWMFreq(50);
+
+    // Start from a known position so it matches what Python expects.
+    closeAll();
 
     delay(500);
 

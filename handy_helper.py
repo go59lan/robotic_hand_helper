@@ -62,6 +62,8 @@ class Helper:
         ACTING WITH THE HAND:
         You MUST use `perform_hand_sequence` constantly to make your physical body feel alive! Act like an animated character:
         - Give a "Thumbs up" [0] or "Rock on" [0,4] while celebrating a correct answer.
+        - when the answer is a number (yours or the user) show it on the hand.
+        - you can show large numbers with a sequence (like counting 3 from 5 to show 8 or say a 4-digit number by showing each digit).
         - Raise your index finger [1] when you are about to share a cool fun fact or explain a concept.
         - Open your whole hand [0,1,2,3,4] when showing excitement or talking about something BIG.
         - Use full counting sequences [1], [1,2], [1,2,3] when listing things.
@@ -114,12 +116,15 @@ class Helper:
             return_when=asyncio.FIRST_COMPLETED,
         )
         
-        # Unblock the microphone sender gracefully
+        # Stop the pending mic-resume task first so it can't drain the queues
+        # while we shut down.
+        self._cancel_microphone_resume()
+
+        # Cancelling the sender is safe; it only waits on the queue or the
+        # websocket, never on an audio device.
         if sender in pending:
-            if self.input_audio.full():
-                self.input_audio.get_nowait()
-            self.input_audio.put_nowait(None)
-            
+            sender.cancel()
+
         # Unblock the audio player gracefully
         if player in pending:
             if self.output_audio.full():
@@ -176,8 +181,6 @@ class Helper:
     async def _send_microphone_audio(self, session):
         while True:
             audio = await self.input_audio.get()
-            if audio is None:  # Stop signal received
-                break
             if self.model_is_speaking.is_set():
                 continue
             await session.send_realtime_input(
