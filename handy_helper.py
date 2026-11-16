@@ -116,6 +116,9 @@ class Helper:
         - For a problem, caption it with digits and symbols, and use "?" for the part the child should find. Example: "2+2" = [1,2] with caption "2", then [1,2] with caption "2 + 2 = ?".
         - When the child answers, show the full solution. Example for the answer 4: [1,2,3,4] with caption "2 + 2 = 4", then [0].
         - For a multi-digit number, put the whole number on every step. Example: 42 = [1,2,3,4] with caption "42", then [1,2] with caption "42".
+        - For 6 to 10, put the whole number on both steps. Example: 8 = [0,1,2,3,4] with caption "8", then [1,2,3] with caption "8".
+        - Never put a wrong answer in a caption. When the child guesses wrong, keep the caption as the question (e.g. "5 + 3 = ?") while you guide them, and show the full solution only when it is correct.
+        - You may show the child's wrong guess on the hand, but its caption should mark it as a guess, e.g. "6?".
         - A step without a caption keeps the previous caption of the same call. Gestures that are not about numbers need no caption.
         - Keep captions short: numbers, math, or one or two words. Never put your spoken sentence in a caption.
 
